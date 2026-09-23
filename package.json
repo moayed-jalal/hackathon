@@ -1,0 +1,23 @@
+{
+  "name": "finbridge",
+  "private": true,
+  "version": "0.1.0",
+  "description": "FinBridge — Secure FinTech Interoperability Sandbox",
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "dev": "pnpm --filter @finbridge/server dev",
+    "dev:web": "pnpm --filter @finbridge/web dev",
+    "build": "pnpm --filter @finbridge/server build && pnpm --filter @finbridge/web build",
+    "db:migrate": "pnpm --filter @finbridge/server db:migrate",
+    "db:seed": "pnpm --filter @finbridge/server db:seed",
+    "test": "pnpm --filter @finbridge/server test",
+    "test:unit": "pnpm --filter @finbridge/server test:unit",
+    "test:integration": "pnpm --filter @finbridge/server test:integration",
+    "test:e2e": "pnpm --filter @finbridge/server test:e2e",
+    "smoke-test": "pnpm --filter @finbridge/server smoke-test"
+  },
+  "devDependencies": {},
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}

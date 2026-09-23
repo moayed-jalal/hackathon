@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: finbridge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: finbridge
+      POSTGRES_PASSWORD: finbridge_sandbox
+      POSTGRES_DB: finbridge
+    ports:
+      - "5544:5432"
+    volumes:
+      - finbridge_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finbridge -d finbridge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  finbridge_postgres_data:

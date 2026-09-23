@@ -1,0 +1,61 @@
+name: finbridge
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-finbridge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env.production}
+      POSTGRES_DB: ${POSTGRES_DB:-finbridge}
+    volumes:
+      - finbridge_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-finbridge} -d ${POSTGRES_DB:-finbridge}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # No ports exposed to the host — only reachable from within the compose network.
+
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    env_file: deploy/.env.production
+    environment:
+      PORT: "4000"
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-finbridge}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-finbridge}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # No host ports — TLS/HTTP are terminated by caddy, which reaches this over the network.
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      CADDY_INGRESS_DOMAIN: ${CADDY_INGRESS_DOMAIN:-hackathon.com.ly}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - finbridge_caddy_data:/data
+      - finbridge_caddy_config:/config
+    depends_on:
+      server:
+        condition: service_healthy
+
+volumes:
+  finbridge_pg_data: {}
+  finbridge_caddy_data: {}
+  finbridge_caddy_config: {}

@@ -1,0 +1,31 @@
+{
+  # Set to your real email so Let's Encrypt can contact you about certificate expiry.
+  email {$ACME_EMAIL}
+}
+
+# https://hackathon.com.ly (Vercel)
+# This VPS only serves the two API subdomains; the main domain routes to Vercel via DNS.
+
+{$CADDY_INGRESS_DOMAIN} {
+	# api.hackathon.com.ly — the FinBridge sandbox API + its own /docs page.
+	reverse_proxy server:4000
+
+	encode gzip
+}
+
+docs.{$CADDY_INGRESS_DOMAIN} {
+	# docs.hackathon.com.ly — the interactive API reference (Scalar).
+	# The page lives at server:4000/docs and loads /openapi.json absolute-path,
+	# so both paths are proxied and everything else boots you over to /docs.
+	handle /docs/* {
+		reverse_proxy server:4000
+	}
+	handle /openapi.json {
+		reverse_proxy server:4000
+	}
+	handle {
+		redir /docs 302
+	}
+
+	encode gzip
+}
