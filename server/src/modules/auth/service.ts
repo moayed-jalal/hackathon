@@ -121,7 +121,13 @@ export async function exchangeCodeForTokens(
   let data: unknown;
   try {
     data = await response.json();
-  } catch {
+  } catch (e) {
+    logger.error("[oauth-diag] token exchange: response body was not valid JSON", {
+      requestId,
+      status: response.status,
+      contentType: response.headers.get("content-type"),
+      errorMessage: e instanceof Error ? e.message : String(e),
+    });
     throw new UnexpectedResponseError(response.status);
   }
 
@@ -131,10 +137,19 @@ export async function exchangeCodeForTokens(
       const description = typeof errorData.error_description === "string" ? errorData.error_description : null;
       throw new OAuth2RequestError(errorData.error, description, null, null);
     }
+    logger.error("[oauth-diag] token exchange: non-200 response with unrecognized body shape", {
+      requestId,
+      status: response.status,
+      bodyKeys: data && typeof data === "object" ? Object.keys(data) : typeof data,
+    });
     throw new UnexpectedResponseError(response.status);
   }
 
   if (!data || typeof data !== "object" || typeof (data as { access_token?: unknown }).access_token !== "string") {
+    logger.error("[oauth-diag] token exchange: 200 response missing access_token", {
+      requestId,
+      bodyKeys: data && typeof data === "object" ? Object.keys(data) : typeof data,
+    });
     throw new UnexpectedResponseError(response.status);
   }
 
