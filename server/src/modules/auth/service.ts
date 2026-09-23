@@ -1,5 +1,6 @@
-import { Google, OAuth2RequestError, ArcticFetchError, UnexpectedResponseError } from "arctic";
-import { encodeBase64url, encodeHexLowerCase, decodeHex } from "@oslojs/encoding";
+import { OAuth2Client, CodeChallengeMethod } from "google-auth-library";
+import { createHash } from "node:crypto";
+import { encodeBase64url, encodeBase64urlNoPadding, encodeHexLowerCase, decodeHex } from "@oslojs/encoding";
 import { config } from "../../config.js";
 import { db } from "../../db/client.js";
 import { users, workspaces, merchants, sessions } from "../../db/schema.js";
@@ -9,11 +10,11 @@ import { createMerchantWithApiKey } from "../merchants/service.js";
 import { recordAuditEvent } from "../audit/service.js";
 import { logger } from "../../logger.js";
 
-const google = new Google(
-  config.google.clientId ?? "dev_google_client_id",
-  config.google.clientSecret ?? "dev_google_client_secret",
-  config.google.redirectUri ?? "http://localhost:4000/auth/google/callback"
-);
+const oauth2Client = new OAuth2Client({
+  clientId: config.google.clientId ?? "dev_google_client_id",
+  clientSecret: config.google.clientSecret ?? "dev_google_client_secret",
+  redirectUri: config.google.redirectUri ?? "http://localhost:4000/auth/google/callback",
+});
 
 export function generateSessionId(): string {
   const bytes = new Uint8Array(32);
@@ -57,109 +58,58 @@ export async function deleteSession(sessionId: string): Promise<void> {
   await db.delete(sessions).where(eq(sessions.id, sessionId));
 }
 
-export async function getGoogleAuthUrl(state: string, codeVerifier: string): Promise<string> {
-  // arctic's Google.createAuthorizationURL takes the raw PKCE verifier and
-  // hashes it (S256) internally to produce code_challenge — do not pre-hash it here.
-  const url = google.createAuthorizationURL(state, codeVerifier, ["openid", "email", "profile"]);
-  return url.toString();
+// RFC 7636 S256: code_challenge = base64url-no-padding(sha256(code_verifier)).
+// codeVerifier itself is unchanged — still our own generateCodeVerifier(),
+// stored in the same OAUTH_VERIFIER_COOKIE and sent back as-is in getToken().
+function computeCodeChallengeS256(codeVerifier: string): string {
+  const hash = createHash("sha256").update(codeVerifier).digest();
+  return encodeBase64urlNoPadding(new Uint8Array(hash));
 }
 
-const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
+export async function getGoogleAuthUrl(state: string, codeVerifier: string): Promise<string> {
+  return oauth2Client.generateAuthUrl({
+    state,
+    scope: ["openid", "email", "profile"],
+    code_challenge_method: CodeChallengeMethod.S256,
+    code_challenge: computeCodeChallengeS256(codeVerifier),
+  });
+}
 
-// Bypasses arctic's Google.validateAuthorizationCode(), which builds its
-// token request by manually setting a Content-Length header (arctic's
-// dist/request.js) — in production this made undici reject the request
-// with "invalid content-length header" (UND_ERR_INVALID_ARG) on every
-// attempt. Letting fetch compute Content-Length itself from a plain
-// string body avoids that path entirely.
+// Uses google-auth-library's OAuth2Client.getToken(), which goes through
+// its gaxios transport instead of a hand-built fetch request. This
+// replaces an earlier hand-rolled implementation that hit two distinct
+// bugs in this environment: arctic's manual Content-Length header made
+// undici reject the request outright, and a follow-up raw fetch() got a
+// 200 response whose body decoded as raw gzip bytes instead of JSON.
 export async function exchangeCodeForTokens(
   code: string,
   codeVerifier: string,
   requestId?: string,
 ): Promise<{ accessToken: () => string }> {
-  const body = new URLSearchParams({
-    grant_type: "authorization_code",
-    code,
-    redirect_uri: config.google.redirectUri ?? "http://localhost:4000/auth/google/callback",
-    client_id: config.google.clientId ?? "dev_google_client_id",
-    client_secret: config.google.clientSecret ?? "dev_google_client_secret",
-    code_verifier: codeVerifier,
-  }).toString();
-
-  // Diagnostics only — never log code, client_secret, code_verifier, or
-  // any token value.
-  logger.info("[oauth-diag] token exchange: sending request", {
-    requestId,
-    bodyByteLength: Buffer.byteLength(body),
-    contentLengthHeaderSetManually: false,
-  });
-
-  const startedAt = Date.now();
-  let response: Response;
   try {
-    response = await fetch(GOOGLE_TOKEN_ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body,
+    const { tokens } = await oauth2Client.getToken({
+      code,
+      codeVerifier,
+      redirect_uri: config.google.redirectUri ?? "http://localhost:4000/auth/google/callback",
     });
-  } catch (e) {
-    logger.error("[oauth-diag] token exchange: request failed before a response was received", {
-      requestId,
-      ms: Date.now() - startedAt,
-      errorName: e instanceof Error ? e.name : undefined,
-      errorMessage: e instanceof Error ? e.message : String(e),
-    });
-    throw new ArcticFetchError(e);
-  }
-
-  logger.info("[oauth-diag] token exchange: response received", {
-    requestId,
-    ms: Date.now() - startedAt,
-    status: response.status,
-    headerNames: Array.from(response.headers.keys()),
-    contentEncoding: response.headers.get("content-encoding"),
-    contentType: response.headers.get("content-type"),
-    contentLength: response.headers.get("content-length"),
-    transferEncoding: response.headers.get("transfer-encoding"),
-  });
-
-  let data: unknown;
-  try {
-    data = await response.json();
-  } catch (e) {
-    logger.error("[oauth-diag] token exchange: response body was not valid JSON", {
-      requestId,
-      status: response.status,
-      contentType: response.headers.get("content-type"),
-      errorMessage: e instanceof Error ? e.message : String(e),
-    });
-    throw new UnexpectedResponseError(response.status);
-  }
-
-  if (response.status !== 200) {
-    if (data && typeof data === "object" && "error" in data && typeof (data as { error: unknown }).error === "string") {
-      const errorData = data as { error: string; error_description?: unknown };
-      const description = typeof errorData.error_description === "string" ? errorData.error_description : null;
-      throw new OAuth2RequestError(errorData.error, description, null, null);
+    oauth2Client.setCredentials(tokens);
+    if (!tokens.access_token) {
+      throw new Error("Google token response had no access_token");
     }
-    logger.error("[oauth-diag] token exchange: non-200 response with unrecognized body shape", {
+    logger.info("[oauth-diag] token exchange: succeeded", { requestId });
+    const accessToken = tokens.access_token;
+    return { accessToken: () => accessToken };
+  } catch (err) {
+    // Never log err.response/err.cause here — for google-auth-library
+    // errors those carry the request/response, which would leak
+    // GOOGLE_CLIENT_SECRET and token values.
+    logger.error("[oauth-diag] token exchange: failed", {
       requestId,
-      status: response.status,
-      bodyKeys: data && typeof data === "object" ? Object.keys(data) : typeof data,
+      errorName: err instanceof Error ? err.name : undefined,
+      errorMessage: err instanceof Error ? err.message : String(err),
     });
-    throw new UnexpectedResponseError(response.status);
+    throw err;
   }
-
-  if (!data || typeof data !== "object" || typeof (data as { access_token?: unknown }).access_token !== "string") {
-    logger.error("[oauth-diag] token exchange: 200 response missing access_token", {
-      requestId,
-      bodyKeys: data && typeof data === "object" ? Object.keys(data) : typeof data,
-    });
-    throw new UnexpectedResponseError(response.status);
-  }
-
-  const accessToken = (data as { access_token: string }).access_token;
-  return { accessToken: () => accessToken };
 }
 
 export async function getGoogleUserInfo(accessToken: string) {

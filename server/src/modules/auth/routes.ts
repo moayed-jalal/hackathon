@@ -1,6 +1,5 @@
 import { Hono } from "hono";
 import { setCookie, deleteCookie, getCookie } from "hono/cookie";
-import { ArcticFetchError, OAuth2RequestError, UnexpectedResponseError } from "arctic";
 import { config } from "../../config.js";
 import { ApiError } from "../../lib/errors.js";
 import { ok } from "../../lib/response.js";
@@ -54,11 +53,7 @@ authRoutes.get("/google", async (c) => {
   setSecureCookie(c, OAUTH_VERIFIER_COOKIE, codeVerifier, 60 * 10);
 
   const authUrl = await getGoogleAuthUrl(state, codeVerifier);
-  // TEMP DIAGNOSTIC — remove once the stuck-on-Google issue is confirmed fixed.
-  logger.info("[oauth-diag] /auth/google -> redirecting to Google", {
-    requestId: c.get("requestId"),
-    authUrl,
-  });
+  logger.info("[oauth-diag] /auth/google -> redirecting to Google", { requestId: c.get("requestId") });
   return c.redirect(authUrl);
 });
 
@@ -70,7 +65,6 @@ authRoutes.get("/google/callback", async (c) => {
   const code = c.req.query("code");
   const error = c.req.query("error");
 
-  // TEMP DIAGNOSTIC — remove once the stuck-on-Google issue is confirmed fixed.
   logger.info("[oauth-diag] /auth/google/callback HIT", {
     requestId,
     hasCode: Boolean(code),
@@ -110,38 +104,18 @@ authRoutes.get("/google/callback", async (c) => {
   try {
     tokens = await exchangeCodeForTokens(code, storedVerifier, requestId);
   } catch (err) {
-    // Never log err.cause verbatim here — for a successful-but-rejected
-    // token request it can carry the request/response, which would leak
-    // GOOGLE_CLIENT_SECRET. Only pull out the specific safe fields below.
-    let detail: Record<string, unknown>;
-    if (err instanceof OAuth2RequestError) {
-      // Google's token endpoint responded, but rejected the request.
-      detail = { kind: "oauth2_request_error", googleError: err.code, googleErrorDescription: err.description };
-    } else if (err instanceof UnexpectedResponseError) {
-      detail = { kind: "unexpected_response", httpStatus: err.status };
-    } else if (err instanceof ArcticFetchError) {
-      // The request to Google's token endpoint never got a response
-      // (DNS/network/TLS failure), as opposed to Google rejecting it.
-      // undici nests the actual socket/DNS error a couple of `.cause`
-      // levels deep under a generic "fetch failed" TypeError — walk down
-      // to it, but only ever pull out {name, message, code}: some levels
-      // of this chain carry the raw Request/socket, which could include
-      // header values, so nothing else is safe to log.
-      const chain: Array<{ name?: string; message?: string; code?: string }> = [];
-      let cause: unknown = err.cause;
-      for (let i = 0; i < 5 && cause instanceof Error; i++) {
-        chain.push({ name: cause.name, message: cause.message, code: (cause as { code?: string }).code });
-        cause = cause.cause;
-      }
-      detail = { kind: "network_error", causeChain: chain };
-    } else {
-      detail = { kind: "unknown", error: err instanceof Error ? err.message : String(err) };
-    }
-    logger.error("Google OAuth token exchange failed", { requestId, ...detail });
+    // Never log err.response/err.cause here — google-auth-library errors
+    // carry the raw request/response there, which would leak
+    // GOOGLE_CLIENT_SECRET and token values. Only the type/message is safe.
+    logger.error("Google OAuth token exchange failed", {
+      requestId,
+      errorName: err instanceof Error ? err.name : undefined,
+      errorMessage: err instanceof Error ? err.message : String(err),
+    });
     await recordAuditEvent({
       type: "AUTH_FAILURE",
       requestId,
-      metadata: { reason: "token_exchange_failed", ...detail },
+      metadata: { reason: "token_exchange_failed" },
     });
     return failLogin("token_exchange_failed");
   }
