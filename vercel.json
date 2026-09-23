@@ -3,5 +3,8 @@
   "framework": "vite",
   "installCommand": "pnpm install",
   "buildCommand": "pnpm --filter @finbridge/web build",
-  "outputDirectory": "web/dist"
+  "outputDirectory": "web/dist",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
 }
