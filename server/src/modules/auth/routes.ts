@@ -122,12 +122,18 @@ authRoutes.get("/google/callback", async (c) => {
     } else if (err instanceof ArcticFetchError) {
       // The request to Google's token endpoint never got a response
       // (DNS/network/TLS failure), as opposed to Google rejecting it.
-      const cause = err.cause;
-      detail = {
-        kind: "network_error",
-        causeName: cause instanceof Error ? cause.name : undefined,
-        causeMessage: cause instanceof Error ? cause.message : String(cause),
-      };
+      // undici nests the actual socket/DNS error a couple of `.cause`
+      // levels deep under a generic "fetch failed" TypeError — walk down
+      // to it, but only ever pull out {name, message, code}: some levels
+      // of this chain carry the raw Request/socket, which could include
+      // header values, so nothing else is safe to log.
+      const chain: Array<{ name?: string; message?: string; code?: string }> = [];
+      let cause: unknown = err.cause;
+      for (let i = 0; i < 5 && cause instanceof Error; i++) {
+        chain.push({ name: cause.name, message: cause.message, code: (cause as { code?: string }).code });
+        cause = cause.cause;
+      }
+      detail = { kind: "network_error", causeChain: chain };
     } else {
       detail = { kind: "unknown", error: err instanceof Error ? err.message : String(err) };
     }
