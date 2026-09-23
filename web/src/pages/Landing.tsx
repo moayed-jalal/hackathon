@@ -21,7 +21,7 @@ import {
 import { CodeBlock } from "../components/CodeBlock";
 import { useHealth } from "../lib/useHealth";
 
-const API_DOCS_URL = "http://localhost:4000/docs";
+const API_DOCS_URL = "https://api.hackathon.com.ly/docs";
 
 function StatusPill() {
   const online = useHealth();
