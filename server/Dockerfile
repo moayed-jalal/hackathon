@@ -1,4 +1,4 @@
-FROM node:20-alpine AS build
+FROM node:22-alpine AS build
 RUN corepack enable
 WORKDIR /app
 
@@ -11,7 +11,7 @@ COPY server server
 RUN pnpm --filter @finbridge/server build
 RUN pnpm --filter @finbridge/server deploy --prod /out
 
-FROM node:20-alpine AS runner
+FROM node:22-alpine AS runner
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=build /out ./
