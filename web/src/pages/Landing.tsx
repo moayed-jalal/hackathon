@@ -88,7 +88,7 @@ Content-Type: application/json
 
 {
   "amount": 15000,
-  "currency": "LYD",
+  "currency": "USD",
   "provider": "sim_provider_a",
   "scenario": "success"
 }`;
@@ -101,7 +101,7 @@ const RESPONSE_A_SNIPPET = `HTTP/1.1 201 Created
     "status": "succeeded",
     "provider": "sim_provider_a",
     "amount": 15000,
-    "currency": "LYD",
+    "currency": "USD",
     "sandbox": true
   },
   "request_id": "req_test_a1b2c3d4"
@@ -115,7 +115,7 @@ const RESPONSE_B_SNIPPET = `HTTP/1.1 201 Created
     "status": "processing",
     "provider": "sim_provider_b",
     "amount": 98000,
-    "currency": "LYD",
+    "currency": "USD",
     "sandbox": true
   },
   "request_id": "req_test_e5f6g7h8"
