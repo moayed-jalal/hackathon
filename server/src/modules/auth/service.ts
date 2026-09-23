@@ -116,6 +116,11 @@ export async function exchangeCodeForTokens(
     requestId,
     ms: Date.now() - startedAt,
     status: response.status,
+    headerNames: Array.from(response.headers.keys()),
+    contentEncoding: response.headers.get("content-encoding"),
+    contentType: response.headers.get("content-type"),
+    contentLength: response.headers.get("content-length"),
+    transferEncoding: response.headers.get("transfer-encoding"),
   });
 
   let data: unknown;
