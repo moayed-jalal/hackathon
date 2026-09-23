@@ -85,7 +85,7 @@ export async function exchangeCodeForTokens(
   code: string,
   codeVerifier: string,
   requestId?: string,
-): Promise<{ accessToken: () => string }> {
+): Promise<{ idToken: string }> {
   try {
     const { tokens } = await oauth2Client.getToken({
       code,
@@ -93,12 +93,13 @@ export async function exchangeCodeForTokens(
       redirect_uri: config.google.redirectUri ?? "http://localhost:4000/auth/google/callback",
     });
     oauth2Client.setCredentials(tokens);
-    if (!tokens.access_token) {
-      throw new Error("Google token response had no access_token");
+    if (!tokens.id_token) {
+      // Shouldn't happen — the "openid" scope always gets one — but
+      // fail closed rather than proceed without a verifiable identity.
+      throw new Error("Google token response had no id_token");
     }
     logger.info("[oauth-diag] token exchange: succeeded", { requestId });
-    const accessToken = tokens.access_token;
-    return { accessToken: () => accessToken };
+    return { idToken: tokens.id_token };
   } catch (err) {
     // Never log err.response/err.cause here — for google-auth-library
     // errors those carry the request/response, which would leak
@@ -112,20 +113,51 @@ export async function exchangeCodeForTokens(
   }
 }
 
-export async function getGoogleUserInfo(accessToken: string) {
-  const response = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  if (!response.ok) {
-    throw new Error("Failed to fetch Google user info");
+// Verifies the ID token's signature, audience, issuer, and expiration via
+// google-auth-library (the officially documented way to authenticate a
+// Google Sign-In user server-side) instead of a separate userinfo HTTP
+// call — every field we need (sub, email, name, picture) is already in
+// the ID token payload for the openid+email+profile scope we request, so
+// there's no second network request to fail.
+export async function verifyGoogleIdentity(
+  idToken: string,
+  requestId?: string,
+): Promise<{ sub: string; email: string; name: string; picture: string | null; email_verified: boolean }> {
+  let payload;
+  try {
+    const ticket = await oauth2Client.verifyIdToken({
+      idToken,
+      audience: config.google.clientId ?? "dev_google_client_id",
+    });
+    payload = ticket.getPayload();
+  } catch (err) {
+    logger.error("[oauth-diag] id token verification failed", {
+      requestId,
+      errorName: err instanceof Error ? err.name : undefined,
+      errorMessage: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
   }
-  return response.json() as Promise<{
-    sub: string;
-    email: string;
-    name: string;
-    picture: string;
-    email_verified: boolean;
-  }>;
+
+  if (!payload || !payload.sub || !payload.email) {
+    logger.error("[oauth-diag] id token verified but missing required claims", {
+      requestId,
+      hasPayload: Boolean(payload),
+      hasSub: Boolean(payload?.sub),
+      hasEmail: Boolean(payload?.email),
+    });
+    throw new Error("Verified Google ID token was missing required claims");
+  }
+
+  logger.info("[oauth-diag] id token verification succeeded", { requestId });
+
+  return {
+    sub: payload.sub,
+    email: payload.email,
+    name: payload.name ?? payload.email,
+    picture: payload.picture ?? null,
+    email_verified: payload.email_verified ?? false,
+  };
 }
 
 const DEV_LOGIN_SUBJECT = "dev_login_subject";
@@ -151,7 +183,7 @@ export async function getOrCreateDevUser(): Promise<typeof users.$inferSelect> {
   return newUser!;
 }
 
-export async function findOrCreateUser(googleUser: { sub: string; email: string; name: string; picture: string }): Promise<typeof users.$inferSelect> {
+export async function findOrCreateUser(googleUser: { sub: string; email: string; name: string; picture: string | null }): Promise<typeof users.$inferSelect> {
   const existingUser = await db.query.users.findFirst({
     where: eq(users.googleSubject, googleUser.sub),
   });

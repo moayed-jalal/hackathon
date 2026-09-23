@@ -6,7 +6,7 @@ const LOGIN_ERROR_MESSAGES: Record<string, string> = {
   missing_params: "The sign-in link was incomplete. Please try again.",
   invalid_state: "That sign-in link expired or was already used. Please try again.",
   token_exchange_failed: "Couldn't complete sign-in with Google. Please try again.",
-  userinfo_fetch_failed: "Couldn't fetch your Google account details. Please try again.",
+  identity_verification_failed: "Couldn't verify your Google account details. Please try again.",
   email_not_verified: "That Google account's email address isn't verified.",
 };
 

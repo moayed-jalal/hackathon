@@ -13,7 +13,7 @@ import {
   deleteSession,
   getGoogleAuthUrl,
   exchangeCodeForTokens,
-  getGoogleUserInfo,
+  verifyGoogleIdentity,
   findOrCreateUser,
   ensureWorkspaceAndMerchant,
   getUserWorkspaceMerchant,
@@ -122,18 +122,16 @@ authRoutes.get("/google/callback", async (c) => {
 
   let googleUser;
   try {
-    googleUser = await getGoogleUserInfo(tokens.accessToken());
+    googleUser = await verifyGoogleIdentity(tokens.idToken, requestId);
   } catch (err) {
-    logger.error("Google userinfo fetch failed", {
-      requestId,
-      error: err instanceof Error ? err.message : String(err),
-    });
+    // service.ts already logged the specific reason (verification failure
+    // vs. missing claims) — this is just the audit trail.
     await recordAuditEvent({
       type: "AUTH_FAILURE",
       requestId,
-      metadata: { reason: "userinfo_fetch_failed" },
+      metadata: { reason: "identity_verification_failed" },
     });
-    return failLogin("userinfo_fetch_failed");
+    return failLogin("identity_verification_failed");
   }
 
   if (!googleUser.email_verified) {
