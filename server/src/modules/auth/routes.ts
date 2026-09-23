@@ -108,7 +108,7 @@ authRoutes.get("/google/callback", async (c) => {
 
   let tokens;
   try {
-    tokens = await exchangeCodeForTokens(code, storedVerifier);
+    tokens = await exchangeCodeForTokens(code, storedVerifier, requestId);
   } catch (err) {
     // Never log err.cause verbatim here — for a successful-but-rejected
     // token request it can carry the request/response, which would leak

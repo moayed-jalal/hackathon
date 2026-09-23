@@ -1,4 +1,4 @@
-import { Google } from "arctic";
+import { Google, OAuth2RequestError, ArcticFetchError, UnexpectedResponseError } from "arctic";
 import { encodeBase64url, encodeHexLowerCase, decodeHex } from "@oslojs/encoding";
 import { config } from "../../config.js";
 import { db } from "../../db/client.js";
@@ -7,6 +7,7 @@ import { eq } from "drizzle-orm";
 import { ids } from "../../lib/ids.js";
 import { createMerchantWithApiKey } from "../merchants/service.js";
 import { recordAuditEvent } from "../audit/service.js";
+import { logger } from "../../logger.js";
 
 const google = new Google(
   config.google.clientId ?? "dev_google_client_id",
@@ -63,8 +64,82 @@ export async function getGoogleAuthUrl(state: string, codeVerifier: string): Pro
   return url.toString();
 }
 
-export async function exchangeCodeForTokens(code: string, codeVerifier: string) {
-  return google.validateAuthorizationCode(code, codeVerifier);
+const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
+
+// Bypasses arctic's Google.validateAuthorizationCode(), which builds its
+// token request by manually setting a Content-Length header (arctic's
+// dist/request.js) — in production this made undici reject the request
+// with "invalid content-length header" (UND_ERR_INVALID_ARG) on every
+// attempt. Letting fetch compute Content-Length itself from a plain
+// string body avoids that path entirely.
+export async function exchangeCodeForTokens(
+  code: string,
+  codeVerifier: string,
+  requestId?: string,
+): Promise<{ accessToken: () => string }> {
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: config.google.redirectUri ?? "http://localhost:4000/auth/google/callback",
+    client_id: config.google.clientId ?? "dev_google_client_id",
+    client_secret: config.google.clientSecret ?? "dev_google_client_secret",
+    code_verifier: codeVerifier,
+  }).toString();
+
+  // Diagnostics only — never log code, client_secret, code_verifier, or
+  // any token value.
+  logger.info("[oauth-diag] token exchange: sending request", {
+    requestId,
+    bodyByteLength: Buffer.byteLength(body),
+    contentLengthHeaderSetManually: false,
+  });
+
+  const startedAt = Date.now();
+  let response: Response;
+  try {
+    response = await fetch(GOOGLE_TOKEN_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
+  } catch (e) {
+    logger.error("[oauth-diag] token exchange: request failed before a response was received", {
+      requestId,
+      ms: Date.now() - startedAt,
+      errorName: e instanceof Error ? e.name : undefined,
+      errorMessage: e instanceof Error ? e.message : String(e),
+    });
+    throw new ArcticFetchError(e);
+  }
+
+  logger.info("[oauth-diag] token exchange: response received", {
+    requestId,
+    ms: Date.now() - startedAt,
+    status: response.status,
+  });
+
+  let data: unknown;
+  try {
+    data = await response.json();
+  } catch {
+    throw new UnexpectedResponseError(response.status);
+  }
+
+  if (response.status !== 200) {
+    if (data && typeof data === "object" && "error" in data && typeof (data as { error: unknown }).error === "string") {
+      const errorData = data as { error: string; error_description?: unknown };
+      const description = typeof errorData.error_description === "string" ? errorData.error_description : null;
+      throw new OAuth2RequestError(errorData.error, description, null, null);
+    }
+    throw new UnexpectedResponseError(response.status);
+  }
+
+  if (!data || typeof data !== "object" || typeof (data as { access_token?: unknown }).access_token !== "string") {
+    throw new UnexpectedResponseError(response.status);
+  }
+
+  const accessToken = (data as { access_token: string }).access_token;
+  return { accessToken: () => accessToken };
 }
 
 export async function getGoogleUserInfo(accessToken: string) {
