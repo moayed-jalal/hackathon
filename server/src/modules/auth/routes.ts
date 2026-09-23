@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { setCookie, deleteCookie, getCookie } from "hono/cookie";
+import { ArcticFetchError, OAuth2RequestError, UnexpectedResponseError } from "arctic";
 import { config } from "../../config.js";
 import { ApiError } from "../../lib/errors.js";
 import { ok } from "../../lib/response.js";
@@ -109,18 +110,32 @@ authRoutes.get("/google/callback", async (c) => {
   try {
     tokens = await exchangeCodeForTokens(code, storedVerifier);
   } catch (err) {
-    const cause = err instanceof Error ? (err.cause as unknown) : undefined;
-    logger.error("Google OAuth token exchange failed", {
-      requestId,
-      error: err instanceof Error ? err.message : String(err),
-      causeName: cause instanceof Error ? cause.name : undefined,
-      causeMessage: cause instanceof Error ? cause.message : cause !== undefined ? String(cause) : undefined,
-      causeCode: cause && typeof cause === "object" ? (cause as { code?: string }).code : undefined,
-    });
+    // Never log err.cause verbatim here — for a successful-but-rejected
+    // token request it can carry the request/response, which would leak
+    // GOOGLE_CLIENT_SECRET. Only pull out the specific safe fields below.
+    let detail: Record<string, unknown>;
+    if (err instanceof OAuth2RequestError) {
+      // Google's token endpoint responded, but rejected the request.
+      detail = { kind: "oauth2_request_error", googleError: err.code, googleErrorDescription: err.description };
+    } else if (err instanceof UnexpectedResponseError) {
+      detail = { kind: "unexpected_response", httpStatus: err.status };
+    } else if (err instanceof ArcticFetchError) {
+      // The request to Google's token endpoint never got a response
+      // (DNS/network/TLS failure), as opposed to Google rejecting it.
+      const cause = err.cause;
+      detail = {
+        kind: "network_error",
+        causeName: cause instanceof Error ? cause.name : undefined,
+        causeMessage: cause instanceof Error ? cause.message : String(cause),
+      };
+    } else {
+      detail = { kind: "unknown", error: err instanceof Error ? err.message : String(err) };
+    }
+    logger.error("Google OAuth token exchange failed", { requestId, ...detail });
     await recordAuditEvent({
       type: "AUTH_FAILURE",
       requestId,
-      metadata: { reason: "token_exchange_failed" },
+      metadata: { reason: "token_exchange_failed", ...detail },
     });
     return failLogin("token_exchange_failed");
   }
