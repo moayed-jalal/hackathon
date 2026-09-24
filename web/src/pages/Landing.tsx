@@ -67,7 +67,7 @@ const FEATURES = [
 const TEAM = [
   { name: "Jaber", photo: "/team/jaber.jpg" },
   { name: "Ahmed", photo: "/team/ahmed.jpeg" },
-  { name: "hawra", photo: "/team/hawra.jpeg" },
+  { name: "hawra", photo: "/team/hawra.jpeg", link: "https://hawra-cv.vercel.app" },
   { name: "Mohamed", photo: "/team/mo.jpeg" },
   { name: "Moayed", photo: "/team/moayed.jpeg", link: "https://momo.ly/" },
 ];
@@ -383,7 +383,19 @@ export function Landing() {
                     alt={member.name}
                     className="h-24 w-24 rounded-full object-cover sm:h-40 sm:w-40"
                   />
-                  <span className="mt-4 text-sm font-semibold text-slate-900">{member.name}</span>
+                  {member.link ? (
+                    <a
+                      href={member.link}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-4 inline-flex items-center gap-1 text-sm font-semibold text-slate-900 underline"
+                    >
+                      {member.name}
+                      <ArrowRight className="h-3.5 w-3.5" />
+                    </a>
+                  ) : (
+                    <span className="mt-4 text-sm font-semibold text-slate-900">{member.name}</span>
+                  )}
                 </div>
               ))}
             </div>
