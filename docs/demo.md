@@ -48,12 +48,14 @@ dashboard's Transactions page in real time.
 ```bash
 curl -s -X POST http://localhost:4000/api/v1/payment-intents \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"amount": 98000, "currency": "LYD", "provider": "sim_provider_b"}' | jq
+  -d '{"amount": 98000, "currency": "LYD", "provider": "sim_provider_b", "scenario": "manual"}' | jq
 ```
 
 **Result:** `status: "processing"`. Same request shape, same endpoint, same response envelope —
 this is the interoperability point: the merchant never wrote provider-specific code, but the
-underlying behavior is genuinely different. Save the returned `id` as `PI`:
+underlying behavior is genuinely different. (Without `"scenario": "manual"`, SimProviderB settles
+on its own via a signed webhook 2–5 seconds later; `manual` keeps it waiting so Step 3 can drive
+the webhook by hand.) Save the returned `id` as `PI`:
 
 ```bash
 export PI=pi_test_...   # from the response above
@@ -161,9 +163,11 @@ immediately after the run — a nice thing to leave open on a second screen duri
 Everything above can also be driven entirely from the UI, for a click-through demo:
 
 1. **Transactions** page → create form → pick `sim_provider_a` / `success` → Create.
-2. Same form → pick `sim_provider_b` → Create → note it lands in `processing`.
-3. Click into that transaction → **Simulate webhook → succeeded** → watch the timeline complete
-   live.
+2. Same form → pick `sim_provider_b` → Create → note it lands in `processing`, then settles to
+   `succeeded` on its own a few seconds later (SimProviderB's signed webhook, pushed live over SSE).
+3. Click into that transaction → **Replay last webhook** / **Send tampered webhook** to exercise
+   the security paths. (**Simulate webhook** is available while a payment is still `processing`,
+   e.g. one created via the API with `"scenario": "manual"`.)
 4. On the same transaction → **Send tampered webhook** → see the `401` result inline.
 5. Same transaction → **Replay last webhook** → see the `409` result inline.
 6. **Security** page → see `WEBHOOK_REJECTED`, `WEBHOOK_REPLAY_REJECTED`, and every other event

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { simProviderA } from "../../src/modules/providers/simProviderA.js";
-import { simProviderB, buildSimProviderBWebhookPayload } from "../../src/modules/providers/simProviderB.js";
+import {
+  simProviderB,
+  buildSimProviderBWebhookPayload,
+  simProviderBSettlementOutcome,
+} from "../../src/modules/providers/simProviderB.js";
 import { getProvider, listProviders } from "../../src/modules/providers/registry.js";
 import { ApiError } from "../../src/lib/errors.js";
 
@@ -53,6 +57,19 @@ describe("SimProviderB (asynchronous)", () => {
     });
     expect(body.data.status).toBe("rejected");
     expect(body.type).toBe("payment.rejected");
+  });
+
+  it("settles as succeeded by default and failed for failure scenarios", () => {
+    expect(simProviderBSettlementOutcome(undefined)).toBe("succeeded");
+    expect(simProviderBSettlementOutcome(null)).toBe("succeeded");
+    expect(simProviderBSettlementOutcome("succeeded")).toBe("succeeded");
+    expect(simProviderBSettlementOutcome("failed")).toBe("failed");
+    expect(simProviderBSettlementOutcome("declined")).toBe("failed");
+    expect(simProviderBSettlementOutcome("rejected")).toBe("failed");
+  });
+
+  it("never settles on its own for the 'manual' scenario", () => {
+    expect(simProviderBSettlementOutcome("manual")).toBeNull();
   });
 });
 

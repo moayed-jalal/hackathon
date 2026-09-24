@@ -25,6 +25,23 @@ export const simProviderB: PaymentProvider = {
   },
 };
 
+/** Scenario that opts a payment out of automatic settlement, so a demo or test drives the webhook itself. */
+export const SIM_PROVIDER_B_MANUAL_SCENARIO = "manual";
+
+const SIM_PROVIDER_B_FAILURE_SCENARIOS = new Set(["failed", "declined", "rejected"]);
+
+/**
+ * The outcome SimProviderB's own (simulated) settlement will report for a
+ * payment, derived from the merchant-supplied `scenario` the same way
+ * SimProviderA derives its immediate result. `null` means the provider never
+ * settles on its own and waits for a manually simulated webhook.
+ */
+export function simProviderBSettlementOutcome(scenario: string | null | undefined): "succeeded" | "failed" | null {
+  if (scenario === SIM_PROVIDER_B_MANUAL_SCENARIO) return null;
+  if (scenario && SIM_PROVIDER_B_FAILURE_SCENARIOS.has(scenario)) return "failed";
+  return "succeeded";
+}
+
 /** Builds the webhook body SimProviderB "sends" once its async settlement completes. */
 export function buildSimProviderBWebhookPayload(params: {
   paymentIntentId: string;

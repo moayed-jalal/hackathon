@@ -391,9 +391,9 @@ describe("merchant webhooks triggered from real payment transitions", () => {
       ids.requestId(),
     );
     expect(created.status).toBe("processing");
-    // The demo auto-webhook timer only fires when NODE_ENV=development, so
-    // it never interferes with this test — settle it explicitly instead.
-    expect(config.nodeEnv).not.toBe("development");
+    // Automatic SimProviderB settlement is off under test, so it never
+    // interferes with this test — settle it explicitly instead.
+    expect(config.simProviderB.autoSettle).toBe(false);
 
     const { body } = buildSimProviderBWebhookPayload({
       paymentIntentId: created.id,

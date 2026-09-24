@@ -129,7 +129,13 @@ settled it). Any other status → `409 INVALID_STATE_TRANSITION`.
 |---|---|---|
 | `sim_provider_a` | `success` (default) | Immediately `succeeded` |
 | `sim_provider_a` | `declined` | Immediately `failed` |
-| `sim_provider_b` | any | Always `processing` immediately; final outcome decided when its webhook fires |
+| `sim_provider_b` | any (default) | Always `processing` immediately; settles to `succeeded` via its own signed webhook 2–5 s later |
+| `sim_provider_b` | `failed` / `declined` / `rejected` | `processing` immediately; settles to `failed` via its webhook |
+| `sim_provider_b` | `manual` | `processing` until a webhook is simulated via `/api/v1/sandbox/.../simulate-webhook` |
+
+Automatic SimProviderB settlement can be turned off with `SIM_PROVIDER_B_AUTO_SETTLE=false` (it is
+off by default under `NODE_ENV=test`). Payments still `processing` when the server restarts are
+re-armed at startup.
 
 ## Provider state machine
 

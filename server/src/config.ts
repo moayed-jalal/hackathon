@@ -31,6 +31,16 @@ export const config = {
       "whsec_sandbox_sim_provider_b_test_key",
     ),
   },
+  simProviderB: {
+    // SimProviderB is a simulated provider in every environment (this is a
+    // sandbox), so it settles its own payments via a signed webhook unless
+    // explicitly disabled. Off by default under test, where a timer would
+    // outlive the test's DB connection and race explicit settlement.
+    autoSettle:
+      process.env.SIM_PROVIDER_B_AUTO_SETTLE !== undefined
+        ? process.env.SIM_PROVIDER_B_AUTO_SETTLE === "true"
+        : (process.env.NODE_ENV ?? "development") !== "test",
+  },
   rateLimit: {
     windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS ?? 10_000),
     maxRequests: Number(process.env.RATE_LIMIT_MAX_REQUESTS ?? 20),

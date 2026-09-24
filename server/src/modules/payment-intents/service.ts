@@ -7,7 +7,7 @@ import { config } from "../../config.js";
 import { logger } from "../../logger.js";
 import { getProvider } from "../providers/registry.js";
 import { recordAuditEvent } from "../audit/service.js";
-import { buildSimProviderBWebhookPayload } from "../providers/simProviderB.js";
+import { buildSimProviderBWebhookPayload, simProviderBSettlementOutcome } from "../providers/simProviderB.js";
 import { signWebhookPayload } from "../../lib/crypto.js";
 import { enqueueMerchantWebhookEvent } from "../merchant-webhooks/service.js";
 import { publishConsoleEvent } from "../console/events.js";
@@ -18,41 +18,45 @@ const AUTO_WEBHOOK_MIN_DELAY_MS = 2000;
 const AUTO_WEBHOOK_MAX_DELAY_MS = 5000;
 
 /**
- * Demo-only: SimProviderB never settles on its own — a real integration would
- * wait for the provider's own webhook. Here we simulate that asynchronous
- * settlement after a short, human-visible delay so the console can show the
- * created -> processing -> (webhook) -> succeeded story live, without anyone
- * touching the "Simulate webhook" button. Goes through the exact same
- * `processSimProviderBWebhook` path a real inbound webhook would take —
- * verification, replay-dedup, and the transition itself are untouched.
- * Dev-only: never fires in "test" (would outlive the test's DB connection)
- * or "production" (a real deployment must wait for the real provider).
+ * SimProviderB's own asynchronous settlement. The provider is simulated in
+ * every environment, so "the provider's webhook" has to come from here: after
+ * a short, human-visible delay it sends the signed settlement webhook, and the
+ * console shows created -> processing -> (webhook) -> succeeded/failed live.
+ * Goes through the exact same `processSimProviderBWebhook` path a real inbound
+ * webhook takes — verification, replay-dedup, and the transition itself are
+ * untouched. Outcome comes from the payment's `scenario` (see
+ * `simProviderBSettlementOutcome`); scenario "manual" opts out so a demo can
+ * drive the webhook by hand. Disabled under test via config.simProviderB.
  */
-function scheduleAutoSimProviderBWebhook(paymentIntentId: string, providerReference: string, requestId: string) {
-  if (config.nodeEnv !== "development") return;
-
-  const delayMs = AUTO_WEBHOOK_MIN_DELAY_MS + Math.random() * (AUTO_WEBHOOK_MAX_DELAY_MS - AUTO_WEBHOOK_MIN_DELAY_MS);
+function scheduleAutoSimProviderBWebhook(
+  paymentIntentId: string,
+  providerReference: string,
+  scenario: string | null,
+  requestId: string,
+  delayMs = AUTO_WEBHOOK_MIN_DELAY_MS + Math.random() * (AUTO_WEBHOOK_MAX_DELAY_MS - AUTO_WEBHOOK_MIN_DELAY_MS),
+) {
+  if (!config.simProviderB.autoSettle) return;
+  const outcome = simProviderBSettlementOutcome(scenario);
+  if (!outcome) return;
 
   setTimeout(() => {
     void (async () => {
       try {
         const { processSimProviderBWebhook } = await import("../webhooks/service.js");
-        const { body } = buildSimProviderBWebhookPayload({
-          paymentIntentId,
-          providerReference,
-          outcome: "succeeded",
-        });
+        const { body } = buildSimProviderBWebhookPayload({ paymentIntentId, providerReference, outcome });
         const rawBody = JSON.stringify(body);
         const timestamp = Math.floor(Date.now() / 1000).toString();
         const signature = signWebhookPayload(rawBody, timestamp, config.webhookSecrets.sim_provider_b);
         await processSimProviderBWebhook(rawBody, { signature, timestamp }, requestId);
+        logger.info("SimProviderB settled payment", { paymentIntentId, outcome });
       } catch (err) {
         // A manual "Simulate webhook" click, a cancellation, or a replay may
         // have already resolved this payment before the timer fired —
         // processSimProviderBWebhook's own CAS/dedup guards turn that into a
-        // clean ApiError (already logged/audited there). Only a genuinely
-        // unexpected failure is worth logging again here.
-        if (!(err instanceof ApiError)) {
+        // clean ApiError (already audited there).
+        if (err instanceof ApiError) {
+          logger.info("Automatic SimProviderB webhook skipped", { paymentIntentId, code: err.code });
+        } else {
           logger.error("Automatic SimProviderB webhook failed", {
             paymentIntentId,
             error: err instanceof Error ? err.message : String(err),
@@ -61,6 +65,32 @@ function scheduleAutoSimProviderBWebhook(paymentIntentId: string, providerRefere
       }
     })();
   }, delayMs);
+}
+
+/**
+ * Settlement timers live in process memory, so a restart/redeploy would
+ * otherwise strand every SimProviderB payment that was still awaiting its
+ * webhook in "processing" forever. Called once at startup to re-arm them.
+ */
+export async function resumePendingSimProviderBSettlements() {
+  if (!config.simProviderB.autoSettle) return 0;
+  const pending = await db.query.paymentIntents.findMany({
+    where: and(eq(paymentIntents.provider, "sim_provider_b"), eq(paymentIntents.status, "processing")),
+  });
+  let resumed = 0;
+  for (const row of pending) {
+    if (!simProviderBSettlementOutcome(row.scenario)) continue;
+    scheduleAutoSimProviderBWebhook(
+      row.id,
+      row.providerReference ?? `spb_${row.id}`,
+      row.scenario,
+      ids.requestId(),
+      AUTO_WEBHOOK_MIN_DELAY_MS + resumed * 250,
+    );
+    resumed += 1;
+  }
+  if (resumed > 0) logger.info("Resumed pending SimProviderB settlements", { count: resumed });
+  return resumed;
 }
 
 type PaymentIntentRow = typeof paymentIntents.$inferSelect;
@@ -154,7 +184,12 @@ export async function createPaymentIntent(
   });
 
   if (updated.provider === "sim_provider_b" && updated.status === "processing") {
-    scheduleAutoSimProviderBWebhook(updated.id, updated.providerReference ?? `spb_${updated.id}`, requestId);
+    scheduleAutoSimProviderBWebhook(
+      updated.id,
+      updated.providerReference ?? `spb_${updated.id}`,
+      updated.scenario,
+      requestId,
+    );
   }
 
   return updated;

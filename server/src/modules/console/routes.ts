@@ -6,14 +6,14 @@ import { rateLimit } from "../../middleware/rateLimit.js";
 import { ApiError } from "../../lib/errors.js";
 import { ok, okList } from "../../lib/response.js";
 import { db } from "../../db/client.js";
-import { auditEvents, paymentIntents, paymentIntentEvents, providerConfigurations, merchants } from "../../db/schema.js";
+import { auditEvents, paymentIntents, paymentIntentEvents, providerConfigurations, merchants, webhookEvents } from "../../db/schema.js";
 import { listAuditEvents } from "../audit/service.js";
 import { processSimProviderBWebhook } from "../webhooks/service.js";
 import { buildSimProviderBWebhookPayload } from "../providers/simProviderB.js";
 import { signWebhookPayload } from "../../lib/crypto.js";
 import { config } from "../../config.js";
 import { withIdempotency } from "../idempotency/service.js";
-import { createPaymentIntentSchema } from "../payment-intents/schemas.js";
+import { createPaymentIntentSchema, simulateWebhookSchema } from "../payment-intents/schemas.js";
 import { applyTransition, createPaymentIntent, serializePaymentIntent } from "../payment-intents/service.js";
 import type { PaymentStatus } from "../payment-intents/state-machine.js";
 import { createApiKeyForMerchant, listApiKeysForMerchant, revokeApiKey } from "../merchants/service.js";
@@ -302,22 +302,35 @@ consoleRoutes.get("/payment-intents/:id", requireSession(), rateLimit, async (c)
   return ok(c, { ...serializePaymentIntent(payment), events: serializeEvents(events) });
 });
 
+async function findWorkspacePaymentIntent(workspaceId: string, id: string) {
+  const merchantIds = await db.select({ id: merchants.id }).from(merchants).where(eq(merchants.workspaceId, workspaceId));
+  const merchantIdList = merchantIds.map((m) => m.id);
+  return db.query.paymentIntents.findFirst({
+    where: (pi, { and, eq, inArray }) => and(eq(pi.id, id), inArray(pi.merchantId, merchantIdList)),
+  });
+}
+
+async function findLastWebhookEvent(paymentIntentId: string) {
+  const event = await db.query.webhookEvents.findFirst({
+    where: eq(webhookEvents.paymentIntentId, paymentIntentId),
+    orderBy: desc(webhookEvents.receivedAt),
+  });
+  if (!event) {
+    throw new ApiError("NOT_FOUND", "No webhook has been delivered for this payment intent yet");
+  }
+  return event;
+}
+
 consoleRoutes.post("/payment-intents/:id/simulate-webhook", requireSession(), rateLimit, async (c) => {
   const sessionUser = c.get("sessionUser");
   const id = c.req.param("id");
-  const body = await c.req.json().catch(() => ({}));
 
-  const merchantIds = await db
-    .select({ id: merchants.id })
-    .from(merchants)
-    .where(eq(merchants.workspaceId, sessionUser.workspaceId));
+  const parsed = simulateWebhookSchema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success) {
+    throw new ApiError("VALIDATION_ERROR", "Invalid simulate-webhook request", { issues: parsed.error.issues });
+  }
 
-  const merchantIdList = merchantIds.map((m) => m.id);
-
-  const payment = await db.query.paymentIntents.findFirst({
-    where: (pi, { and, eq, inArray }) => and(eq(pi.id, id), inArray(pi.merchantId, merchantIdList)),
-  });
-
+  const payment = await findWorkspacePaymentIntent(sessionUser.workspaceId, id);
   if (!payment) {
     return c.json({ error: { code: "NOT_FOUND", message: "Payment not found" } }, 404);
   }
@@ -325,11 +338,14 @@ consoleRoutes.post("/payment-intents/:id/simulate-webhook", requireSession(), ra
   if (payment.provider !== "sim_provider_b") {
     return c.json({ error: { code: "INVALID_OPERATION", message: "Only SimProviderB payments can simulate webhooks" } }, 400);
   }
+  if (payment.status !== "processing") {
+    throw new ApiError("INVALID_STATE_TRANSITION", `Payment intent is "${payment.status}", not awaiting a webhook`);
+  }
 
   const { body: webhookBody } = buildSimProviderBWebhookPayload({
     paymentIntentId: payment.id,
     providerReference: payment.providerReference ?? `spb_${payment.id}`,
-    outcome: body.outcome ?? "succeeded",
+    outcome: parsed.data.outcome,
   });
   const rawBody = JSON.stringify(webhookBody);
   const timestamp = Math.floor(Date.now() / 1000).toString();
@@ -340,68 +356,48 @@ consoleRoutes.post("/payment-intents/:id/simulate-webhook", requireSession(), ra
   return ok(c, { success: true });
 });
 
+/** Resends the exact last stored webhook byte-for-byte (same event_id, body, signature, timestamp). Expected: 409 DUPLICATE_EVENT. */
 consoleRoutes.post("/payment-intents/:id/replay-webhook", requireSession(), rateLimit, async (c) => {
   const sessionUser = c.get("sessionUser");
   const id = c.req.param("id");
 
-  const merchantIds = await db
-    .select({ id: merchants.id })
-    .from(merchants)
-    .where(eq(merchants.workspaceId, sessionUser.workspaceId));
-
-  const merchantIdList = merchantIds.map((m) => m.id);
-
-  const payment = await db.query.paymentIntents.findFirst({
-    where: (pi, { and, eq, inArray }) => and(eq(pi.id, id), inArray(pi.merchantId, merchantIdList)),
-  });
-
+  const payment = await findWorkspacePaymentIntent(sessionUser.workspaceId, id);
   if (!payment) {
     return c.json({ error: { code: "NOT_FOUND", message: "Payment not found" } }, 404);
   }
 
-  const { body: webhookBody } = buildSimProviderBWebhookPayload({
-    paymentIntentId: payment.id,
-    providerReference: payment.providerReference ?? `spb_${payment.id}`,
-    outcome: "succeeded",
-  });
-  const rawBody = JSON.stringify(webhookBody);
-  const timestamp = Math.floor(Date.now() / 1000).toString();
-  const signature = signWebhookPayload(rawBody, timestamp, config.webhookSecrets.sim_provider_b);
-
-  await processSimProviderBWebhook(rawBody, { signature, timestamp }, c.get("requestId") as string);
+  const event = await findLastWebhookEvent(payment.id);
+  await processSimProviderBWebhook(
+    event.rawBody,
+    { signature: event.signature, timestamp: event.timestampHeader },
+    c.get("requestId") as string,
+  );
 
   return ok(c, { success: true });
 });
 
+/** Flips the last stored webhook's settlement status but keeps its original signature. Expected: 401 INVALID_SIGNATURE. */
 consoleRoutes.post("/payment-intents/:id/tamper-webhook", requireSession(), rateLimit, async (c) => {
   const sessionUser = c.get("sessionUser");
   const id = c.req.param("id");
 
-  const merchantIds = await db
-    .select({ id: merchants.id })
-    .from(merchants)
-    .where(eq(merchants.workspaceId, sessionUser.workspaceId));
-
-  const merchantIdList = merchantIds.map((m) => m.id);
-
-  const payment = await db.query.paymentIntents.findFirst({
-    where: (pi, { and, eq, inArray }) => and(eq(pi.id, id), inArray(pi.merchantId, merchantIdList)),
-  });
-
+  const payment = await findWorkspacePaymentIntent(sessionUser.workspaceId, id);
   if (!payment) {
     return c.json({ error: { code: "NOT_FOUND", message: "Payment not found" } }, 404);
   }
 
-  const { body: webhookBody } = buildSimProviderBWebhookPayload({
-    paymentIntentId: payment.id,
-    providerReference: payment.providerReference ?? `spb_${payment.id}`,
-    outcome: "succeeded",
+  const event = await findLastWebhookEvent(payment.id);
+  const original = JSON.parse(event.rawBody) as { data: { status: string } };
+  const tamperedRawBody = JSON.stringify({
+    ...original,
+    data: { ...original.data, status: original.data.status === "settled" ? "rejected" : "settled" },
   });
-  const rawBody = JSON.stringify(webhookBody);
-  const timestamp = Math.floor(Date.now() / 1000).toString();
-  const signature = "0".repeat(64);
 
-  await processSimProviderBWebhook(rawBody, { signature, timestamp }, c.get("requestId") as string);
+  await processSimProviderBWebhook(
+    tamperedRawBody,
+    { signature: event.signature, timestamp: Math.floor(Date.now() / 1000).toString() },
+    c.get("requestId") as string,
+  );
 
   return ok(c, { success: true });
 });
