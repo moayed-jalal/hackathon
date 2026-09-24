@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import http from "node:http";
+import dns from "node:dns/promises";
 import type { AddressInfo } from "node:net";
 import { eq } from "drizzle-orm";
 import { sql, db } from "../../src/db/client.js";
@@ -284,6 +285,32 @@ describe("merchant webhook delivery", () => {
 
     const result = await attemptDelivery(eventId, ids.requestId(), { chainRetries: false });
     expect(result.success).toBe(false);
+    // The underlying cause is surfaced, not just undici's generic "fetch failed".
+    expect(result.error).toMatch(/^fetch failed: .+/);
+  });
+
+  it("delivers to a hostname URL, not only an IP literal (pinned lookup is actually exercised)", async () => {
+    // Node skips the connector's lookup entirely for IP-literal hosts, so the
+    // 127.0.0.1 mock URL above never exercises the pinned lookup. Every real
+    // merchant URL is a hostname, so bind a listener to whatever "localhost"
+    // resolves to here and deliver to it by name.
+    const { address } = await dns.lookup("localhost");
+    const hostnameServer = http.createServer((_req, res) => {
+      res.writeHead(200);
+      res.end();
+    });
+    await new Promise<void>((resolve) => hostnameServer.listen(0, address, resolve));
+    const url = `http://localhost:${(hostnameServer.address() as AddressInfo).port}/webhooks`;
+    try {
+      const merchant = await makeMerchant("Delivery Hostname");
+      await upsertMerchantWebhookUrl(merchant.id, url, undefined);
+      const eventId = await insertPendingDelivery(merchant.id, url);
+
+      const result = await attemptDelivery(eventId, ids.requestId(), { chainRetries: false });
+      expect(result).toEqual({ success: true, httpStatus: 200 });
+    } finally {
+      await new Promise<void>((resolve) => hostnameServer.close(() => resolve()));
+    }
   });
 
   it("retries up to the bounded maximum, reusing the same event id, then gives up", async () => {

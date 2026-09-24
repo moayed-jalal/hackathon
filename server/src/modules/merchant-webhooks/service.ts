@@ -329,11 +329,20 @@ async function deliverOnce(
   // Pin the connection to the exact IP we just validated instead of letting
   // undici re-resolve DNS itself — this is what actually closes the
   // DNS-rebinding gap (see lib/webhookUrlSafety.ts's module doc comment).
+  // Node's net.connect calls lookup with `{ all: true }` whenever
+  // autoSelectFamily (Happy Eyeballs) is on — the default since Node 20 — and
+  // then expects an array of `{ address, family }`. Answering that call with a
+  // bare string fails every hostname-based delivery with
+  // ERR_INVALID_IP_ADDRESS ("Invalid IP address: undefined") before any
+  // packet is sent, so both callback shapes must be honoured.
   const pinnedLookup = (
     _hostname: string,
-    _opts: unknown,
-    callback: (err: Error | null, address?: string, family?: number) => void,
-  ) => callback(null, validatedIp, family);
+    opts: { all?: boolean } | undefined,
+    callback: (err: Error | null, address?: string | { address: string; family: number }[], family?: number) => void,
+  ) => {
+    if (opts?.all) callback(null, [{ address: validatedIp, family }]);
+    else callback(null, validatedIp, family);
+  };
 
   const dispatcher = new Agent({
     connect: { timeout: DELIVERY_TIMEOUT_MS, lookup: pinnedLookup } as never,
@@ -359,12 +368,32 @@ async function deliverOnce(
     }
     return { success: false, httpStatus: res.status, error: `Merchant endpoint responded with HTTP ${res.status}` };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    // undici wraps every network failure as a bare "fetch failed" TypeError;
+    // the actionable reason (ECONNREFUSED, ETIMEDOUT, TLS errors, ...) lives
+    // on the cause chain, so surface it in both the log and the stored error.
+    const message = describeFetchError(err);
     logger.warn("Merchant webhook delivery attempt failed", { requestId, eventId, error: message });
     return { success: false, error: message };
   } finally {
     await dispatcher.close().catch(() => {});
   }
+}
+
+/** Flattens an error and its `cause` chain into one line, e.g. "fetch failed: connect ECONNREFUSED 1.2.3.4:443". */
+function describeFetchError(err: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = err;
+  for (let depth = 0; current && depth < 5; depth++) {
+    if (current instanceof Error) {
+      const code = (current as { code?: unknown }).code;
+      parts.push(typeof code === "string" && !current.message.includes(code) ? `${current.message} (${code})` : current.message);
+      current = current.cause;
+    } else {
+      parts.push(String(current));
+      break;
+    }
+  }
+  return parts.join(": ");
 }
 
 /**
