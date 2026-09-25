@@ -42,6 +42,22 @@ export function Login() {
     window.location.href = `${import.meta.env.VITE_API_BASE_URL ?? ""}/auth/google`;
   }
 
+  async function handleDevLogin() {
+    setLoading(true);
+    try {
+      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL ?? ""}/auth/dev-login`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (response.ok) {
+        navigate(redirect, { replace: true });
+      }
+    } catch {
+    } finally {
+      setLoading(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50">
@@ -91,6 +107,16 @@ export function Login() {
               </svg>
               Continue with Google
             </button>
+
+            {import.meta.env.DEV && (
+              <button
+                onClick={handleDevLogin}
+                disabled={loading}
+                className="w-full flex items-center justify-center gap-2 rounded-lg bg-ink px-4 py-3 text-sm font-medium text-white hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-brand-500 transition-colors"
+              >
+                Continue as Sandbox Judge (dev only)
+              </button>
+            )}
 
             <p className="text-center text-xs text-slate-400">
               Sandbox environment • No real money
